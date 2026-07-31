@@ -1,22 +1,26 @@
+import os
 import hmac
 import hashlib
 from datetime import datetime, timedelta
 from typing import Optional
+from dotenv import load_dotenv
 from jose import jwt, JWTError
 from pwdlib import PasswordHash
 from pwdlib.hashers.bcrypt import BcryptHasher
 from cryptography.fernet import Fernet
 
-# Claves Secretas del Sistema AgroSwarm
-SECRET_KEY = "AGROSWARM_SHIELD_SUPER_SECRET_JWT_KEY_2026"
+load_dotenv()
+
+# Claves Secretas del Sistema AgroSwarm (fijas, cargadas desde .env)
+SECRET_KEY = os.environ["JWT_SECRET_KEY"]
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 
 # Clave secreta compartida entre el Servidor y los Nodos Mesh / ESP32
-HMAC_MESH_SECRET = b"AGRO_MESH_SECRET_HMAC_KEY_9981"
+HMAC_MESH_SECRET = os.environ["MESH_HMAC_SECRET"].encode('utf-8')
 
 # Cifrado simétrico Fernet para payload del enjambre
-FERNET_KEY = Fernet.generate_key()
+FERNET_KEY = os.environ["FERNET_KEY"].encode('utf-8')
 cipher_suite = Fernet(FERNET_KEY)
 
 # Instancia de hasher de contraseñas moderna (reemplazo sin bugs de passlib)
@@ -55,3 +59,7 @@ def verify_mesh_signature(data: str, signature: str) -> bool:
 def encrypt_mesh_payload(payload_str: str) -> str:
     """Cifra el paquete de datos que viaja en la red de malla."""
     return cipher_suite.encrypt(payload_str.encode('utf-8')).decode('utf-8')
+
+def decrypt_mesh_payload(encrypted_str: str) -> str:
+    """Descifra el paquete de datos recibido desde la red de malla."""
+    return cipher_suite.decrypt(encrypted_str.encode('utf-8')).decode('utf-8')
