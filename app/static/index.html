@@ -1,0 +1,639 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AgroSwarm Shield</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css" />
+<style>
+  :root {
+    --verde: #2e7d32;
+    --verde-claro: #66bb6a;
+    --verde-oscuro: #1b5e20;
+    --fondo: #0f1712;
+    --panel: #17231a;
+    --texto: #e8f5e9;
+    --texto-tenue: #a5c9a8;
+    --rojo: #d32f2f;
+    --amarillo: #f9a825;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: "Segoe UI", Arial, sans-serif;
+    background: var(--fondo);
+    color: var(--texto);
+  }
+  /* ---------- PANTALLA DE LOGIN ---------- */
+  #pantalla-login {
+    height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 16px;
+  }
+  #pantalla-login h1 {
+    color: var(--verde-claro);
+    margin-bottom: 0;
+  }
+  #pantalla-login p.subtitulo {
+    color: var(--texto-tenue);
+    margin-top: 0;
+  }
+  .caja-login {
+    background: var(--panel);
+    padding: 32px;
+    border-radius: 12px;
+    width: 320px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    border: 1px solid #24352a;
+  }
+  .enlace-cambiar {
+    background: none;
+    color: var(--verde-claro);
+    text-decoration: underline;
+    padding: 4px;
+    font-weight: 400;
+  }
+  .enlace-cambiar:hover { color: var(--texto); }
+  input {
+    background: #0f1712;
+    border: 1px solid #2f4635;
+    color: var(--texto);
+    padding: 10px 12px;
+    border-radius: 8px;
+    font-size: 14px;
+  }
+  button {
+    cursor: pointer;
+    border: none;
+    border-radius: 8px;
+    padding: 10px 14px;
+    font-size: 14px;
+    font-weight: 600;
+  }
+  .btn-primario {
+    background: var(--verde);
+    color: white;
+  }
+  .btn-primario:hover { background: var(--verde-claro); }
+  #error-login {
+    color: #ff8a80;
+    font-size: 13px;
+    min-height: 16px;
+  }
+
+  /* ---------- DASHBOARD ---------- */
+  #dashboard { display: none; height: 100vh; flex-direction: column; }
+  header {
+    background: var(--panel);
+    padding: 10px 20px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid #24352a;
+  }
+  header h2 { margin: 0; color: var(--verde-claro); font-size: 18px; }
+  header .rancho { font-size: 12px; color: var(--texto-tenue); }
+  #contenido { flex: 1; display: flex; overflow: hidden; }
+  #mapa { flex: 1; }
+  #panel-lateral {
+    width: 340px;
+    background: var(--panel);
+    padding: 16px;
+    overflow-y: auto;
+    border-left: 1px solid #24352a;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+  }
+  .seccion h3 {
+    margin: 0 0 8px 0;
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--texto-tenue);
+  }
+  .fila-input { display: flex; gap: 8px; margin-bottom: 8px; }
+  .fila-input input { flex: 1; }
+  .btn-desplegar {
+    background: var(--verde);
+    color: white;
+    width: 100%;
+    padding: 12px;
+  }
+  .btn-desplegar:hover { background: var(--verde-claro); }
+  .btn-kill {
+    background: var(--rojo);
+    color: white;
+    width: 100%;
+    padding: 14px;
+    font-size: 15px;
+    letter-spacing: 0.5px;
+  }
+  .btn-kill:hover { background: #ff5252; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid #24352a; }
+  th { color: var(--texto-tenue); font-weight: 500; }
+  .bateria-alta { color: #66bb6a; }
+  .bateria-media { color: var(--amarillo); }
+  .bateria-baja { color: var(--rojo); }
+  #contador-intrusiones {
+    font-size: 28px;
+    font-weight: 700;
+    color: var(--rojo);
+  }
+  #log-eventos {
+    font-size: 11px;
+    max-height: 160px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .evento {
+    padding: 6px 8px;
+    border-radius: 6px;
+    background: #10190f;
+    border-left: 3px solid var(--verde-claro);
+  }
+  .evento.intrusion { border-left-color: var(--rojo); }
+  .evento.kill { border-left-color: var(--amarillo); }
+  .evento.plaga { border-left-color: #8bc34a; }
+  #estado-conexion {
+    font-size: 11px;
+    padding: 4px 10px;
+    border-radius: 12px;
+    background: #24352a;
+  }
+  #estado-conexion.conectado { background: #1b3a20; color: #66bb6a; }
+  #estado-conexion.desconectado { background: #3a1b1b; color: #ff8a80; }
+
+  /* Iconos del mapa: la abeja se desliza suavemente entre posiciones en
+     vez de saltar de golpe, para que se vea como un vuelo real. */
+  .leaflet-marker-icon {
+    transition: transform 2.2s linear;
+  }
+  .icono-abeja {
+    font-size: 26px;
+    text-align: center;
+    line-height: 1;
+    filter: drop-shadow(0 0 2px rgba(0,0,0,0.6));
+  }
+  .icono-abeja.regresando { opacity: 0.75; }
+  .icono-abeja.detenido { opacity: 0.4; filter: grayscale(1); }
+  .icono-colmena {
+    font-size: 30px;
+    text-align: center;
+    line-height: 1;
+  }
+</style>
+</head>
+<body>
+
+<!-- ===================== PANTALLA DE LOGIN ===================== -->
+<div id="pantalla-login">
+  <h1>🐝 AgroSwarm Shield</h1>
+  <p class="subtitulo">Panel de control del enjambre</p>
+  <div class="caja-login" id="caja-login">
+    <input id="input-usuario" type="text" placeholder="Usuario" value="rancho_utma" />
+    <input id="input-password" type="password" placeholder="Contraseña" value="agrotech2026" />
+    <button class="btn-primario" onclick="iniciarSesion()">Iniciar sesión</button>
+    <div id="error-login"></div>
+    <button class="enlace-cambiar" onclick="mostrarFormulario('registro')">¿No tienes cuenta? Crear una</button>
+  </div>
+
+  <div class="caja-login" id="caja-registro" style="display:none;">
+    <input id="registro-usuario" type="text" placeholder="Usuario para tu rancho" />
+    <input id="registro-rancho" type="text" placeholder="Nombre del rancho" />
+    <input id="registro-password" type="password" placeholder="Contraseña (mínimo 6 caracteres)" />
+    <button class="btn-primario" onclick="registrarse()">Crear cuenta</button>
+    <div id="error-registro"></div>
+    <button class="enlace-cambiar" onclick="mostrarFormulario('login')">Ya tengo cuenta, iniciar sesión</button>
+  </div>
+</div>
+
+<!-- ===================== DASHBOARD ===================== -->
+<div id="dashboard">
+  <header>
+    <div>
+      <h2>🐝 AgroSwarm Shield</h2>
+      <div class="rancho" id="nombre-rancho"></div>
+    </div>
+    <div id="estado-conexion" class="desconectado">Conectando...</div>
+  </header>
+
+  <div id="contenido">
+    <div id="mapa"></div>
+
+    <div id="panel-lateral">
+      <div class="seccion">
+        <h3>Desplegar escudo</h3>
+        <div class="fila-input">
+          <input id="input-terreno" type="text" placeholder="ID del terreno" value="TERRENO-AGS-NORTE" />
+        </div>
+        <div class="fila-input">
+          <input id="input-num-drones" type="number" placeholder="N° de drones" value="5" min="1" max="30" />
+        </div>
+        <div id="recomendacion-drones" style="font-size:11px; color:var(--verde-claro); min-height:14px; margin-bottom:8px;"></div>
+        <div style="font-size:11px; color:var(--texto-tenue); margin-bottom:8px; line-height:1.6;">
+          <b>Cómo marcar tu terreno:</b><br>
+          1. En el mapa, haz click en el ícono ⬠ (arriba a la izquierda, debajo de los botones + / −).<br>
+          2. Haz click en el mapa para ir poniendo las esquinas de tu terreno.<br>
+          3. Para cerrar la figura, haz click otra vez sobre la primera esquina que pusiste.<br>
+          4. Al cerrar, se calcula solo cuántos drones se recomiendan (~1 cada 5 m²). Ajústalo si quieres y presiona el botón de abajo.
+        </div>
+        <button class="btn-desplegar" onclick="desplegarEscudo()">🛰️ Desplegar Escudo</button>
+      </div>
+
+      <div class="seccion">
+        <h3>Drones activos</h3>
+        <table>
+          <thead><tr><th>ID</th><th>Batería</th><th>Estado</th></tr></thead>
+          <tbody id="tabla-drones"></tbody>
+        </table>
+      </div>
+
+      <div class="seccion">
+        <h3>Ciberseguridad</h3>
+        <div>Intentos de intrusión bloqueados</div>
+        <div id="contador-intrusiones">0</div>
+        <button class="btn-kill" onclick="activarKillSwitch()">🛑 KILL-SWITCH DE EMERGENCIA</button>
+      </div>
+
+      <div class="seccion">
+        <h3>Actividad en vivo</h3>
+        <div id="log-eventos"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
+<script>
+  // ---------- ESTADO GLOBAL ----------
+  let token = null;
+  let ws = null;
+  const drones = {}; // dron_id -> { marker, bateria, estado }
+  let totalIntrusiones = 0;
+
+  const CENTRO_MAPA = [21.8823, -102.2826]; // Aguascalientes
+
+  // ---------- CAMBIAR ENTRE LOGIN Y REGISTRO ----------
+  function mostrarFormulario(cual) {
+    document.getElementById("caja-login").style.display = cual === "login" ? "flex" : "none";
+    document.getElementById("caja-registro").style.display = cual === "registro" ? "flex" : "none";
+    document.getElementById("error-login").textContent = "";
+    document.getElementById("error-registro").textContent = "";
+  }
+
+  function entrarAlDashboard(datos) {
+    token = datos.access_token;
+    document.getElementById("nombre-rancho").textContent = datos.rancho;
+    document.getElementById("pantalla-login").style.display = "none";
+    document.getElementById("dashboard").style.display = "flex";
+    inicializarMapa();
+    conectarTelemetria();
+  }
+
+  // ---------- REGISTRO ----------
+  async function registrarse() {
+    const usuario = document.getElementById("registro-usuario").value.trim();
+    const rancho = document.getElementById("registro-rancho").value.trim();
+    const password = document.getElementById("registro-password").value;
+    const cajaError = document.getElementById("error-registro");
+    cajaError.textContent = "";
+
+    if (!usuario || !rancho || !password) {
+      cajaError.textContent = "Llena los 3 campos para crear tu cuenta.";
+      return;
+    }
+
+    try {
+      const resp = await fetch("/api/v1/auth/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: usuario, password: password, rancho_name: rancho })
+      });
+      const datos = await resp.json();
+      if (!resp.ok) {
+        cajaError.textContent = datos.detail || "No se pudo crear la cuenta";
+        return;
+      }
+      entrarAlDashboard(datos);
+    } catch (e) {
+      cajaError.textContent = "No se pudo conectar con el servidor.";
+    }
+  }
+
+  // ---------- LOGIN ----------
+  async function iniciarSesion() {
+    const usuario = document.getElementById("input-usuario").value.trim();
+    const password = document.getElementById("input-password").value;
+    const cajaError = document.getElementById("error-login");
+    cajaError.textContent = "";
+
+    try {
+      const resp = await fetch("/api/v1/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: usuario, password: password })
+      });
+      const datos = await resp.json();
+      if (!resp.ok) {
+        cajaError.textContent = datos.detail || "Credenciales incorrectas";
+        return;
+      }
+      entrarAlDashboard(datos);
+    } catch (e) {
+      cajaError.textContent = "No se pudo conectar con el servidor.";
+    }
+  }
+
+  // ---------- MAPA ----------
+  let mapa, capaDibujo, controlDibujo, marcadorColmena;
+
+  function inicializarMapa() {
+    mapa = L.map("mapa").setView(CENTRO_MAPA, 15);
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      attribution: "© OpenStreetMap"
+    }).addTo(mapa);
+
+    // Colmena solar: punto fijo de donde salen y a donde regresan los drones.
+    const iconoColmena = L.divIcon({
+      className: "",
+      html: '<div class="icono-colmena">🍯</div>',
+      iconSize: [30, 30],
+      iconAnchor: [15, 15]
+    });
+    marcadorColmena = L.marker(CENTRO_MAPA, { icon: iconoColmena, zIndexOffset: -100 })
+      .addTo(mapa)
+      .bindPopup("<b>Colmena Solar</b><br>Base de despegue y recarga del enjambre");
+
+    capaDibujo = new L.FeatureGroup();
+    mapa.addLayer(capaDibujo);
+
+    // Traducir al español los textos de la herramienta de dibujo (por
+    // defecto vienen en inglés y eso hacía parecer que no funcionaba).
+    L.drawLocal.draw.toolbar.buttons.polygon = "Dibujar el polígono del terreno";
+    L.drawLocal.draw.toolbar.actions.title = "Cancelar el dibujo";
+    L.drawLocal.draw.toolbar.actions.text = "Cancelar";
+    L.drawLocal.draw.toolbar.finish.title = "Terminar el polígono";
+    L.drawLocal.draw.toolbar.finish.text = "Terminar";
+    L.drawLocal.draw.toolbar.undo.title = "Borrar el último punto puesto";
+    L.drawLocal.draw.toolbar.undo.text = "Borrar último punto";
+    L.drawLocal.draw.handlers.polygon.tooltip.start = "Haz click en el mapa para poner la primera esquina de tu terreno";
+    L.drawLocal.draw.handlers.polygon.tooltip.cont = "Haz click para poner la siguiente esquina";
+    L.drawLocal.draw.handlers.polygon.tooltip.end = "Haz click en la primera esquina otra vez para cerrar el terreno";
+    L.drawLocal.edit.toolbar.buttons.edit = "Editar el terreno";
+    L.drawLocal.edit.toolbar.buttons.editDisabled = "No hay ningún terreno para editar";
+    L.drawLocal.edit.toolbar.buttons.remove = "Borrar el terreno";
+    L.drawLocal.edit.toolbar.buttons.removeDisabled = "No hay ningún terreno para borrar";
+    L.drawLocal.edit.toolbar.actions.save.title = "Guardar cambios";
+    L.drawLocal.edit.toolbar.actions.save.text = "Guardar";
+    L.drawLocal.edit.toolbar.actions.cancel.title = "Cancelar edición";
+    L.drawLocal.edit.toolbar.actions.cancel.text = "Cancelar";
+    L.drawLocal.edit.toolbar.actions.clearAll.title = "Borrar todo";
+    L.drawLocal.edit.toolbar.actions.clearAll.text = "Borrar todo";
+    L.drawLocal.edit.handlers.edit.tooltip.text = "Arrastra las esquinas para ajustar el terreno";
+    L.drawLocal.edit.handlers.edit.tooltip.subtext = "Haz click en \"Cancelar\" para deshacer los cambios";
+    L.drawLocal.edit.handlers.remove.tooltip.text = "Haz click en el terreno para borrarlo";
+
+    controlDibujo = new L.Control.Draw({
+      draw: {
+        polygon: true, marker: false, circle: false,
+        circlemarker: false, rectangle: false, polyline: false
+      },
+      edit: { featureGroup: capaDibujo }
+    });
+    mapa.addControl(controlDibujo);
+
+    mapa.on(L.Draw.Event.CREATED, function (e) {
+      capaDibujo.clearLayers(); // solo un polígono de terreno a la vez
+      capaDibujo.addLayer(e.layer);
+      actualizarRecomendacionDrones();
+    });
+    mapa.on(L.Draw.Event.EDITED, actualizarRecomendacionDrones);
+  }
+
+  function obtenerCoordenadasPoligono() {
+    const capas = capaDibujo.getLayers();
+    if (capas.length === 0) return null;
+    const latlngs = capas[0].getLatLngs()[0];
+    return latlngs.map(p => [p.lat, p.lng]);
+  }
+
+  // Calcula el área real del terreno dibujado y recomienda cuántos drones
+  // usar (regla del proyecto: ~1 dron por cada 5 m²).
+  const M2_POR_DRON = 5;
+
+  function actualizarRecomendacionDrones() {
+    const capas = capaDibujo.getLayers();
+    const cajaTexto = document.getElementById("recomendacion-drones");
+    if (capas.length === 0) {
+      cajaTexto.textContent = "";
+      return;
+    }
+    const latlngs = capas[0].getLatLngs()[0];
+    const areaM2 = L.GeometryUtil.geodesicArea(latlngs);
+    const recomendados = Math.max(1, Math.round(areaM2 / M2_POR_DRON));
+    const usados = Math.min(recomendados, 30);
+    document.getElementById("input-num-drones").value = usados;
+    let texto = `Terreno: ~${Math.round(areaM2).toLocaleString("es-MX")} m² → se recomiendan ${recomendados.toLocaleString("es-MX")} drones`;
+    if (recomendados > 30) {
+      texto += ` (se simulan máximo 30 en el mapa)`;
+    }
+    cajaTexto.textContent = texto;
+  }
+
+  // ---------- DRONES EN EL MAPA (abejas) ----------
+  const EMOJI_POR_ESTADO = {
+    PATRULLANDO: "🐝",
+    TRATANDO_PLAGA: "🐝",
+    REGRESANDO_BASE: "🐝",
+    EN_BASE: "🐝"
+  };
+  const TEXTO_ESTADO = {
+    PATRULLANDO: "Saliendo a patrullar",
+    TRATANDO_PLAGA: "Tratando plaga",
+    REGRESANDO_BASE: "Regresando a la colmena",
+    EN_BASE: "Aterrizado (kill-switch)"
+  };
+
+  function iconoAbeja(estado) {
+    let clase = "icono-abeja";
+    if (estado === "REGRESANDO_BASE") clase += " regresando";
+    if (estado === "EN_BASE") clase += " detenido";
+    return L.divIcon({
+      className: "",
+      html: `<div class="${clase}">${EMOJI_POR_ESTADO[estado] || "🐝"}</div>`,
+      iconSize: [26, 26],
+      iconAnchor: [13, 13]
+    });
+  }
+
+  function moverColmena(lat, lng) {
+    if (!marcadorColmena) return;
+    marcadorColmena.setLatLng([lat, lng]);
+  }
+
+  function limpiarAbejasDelMapa() {
+    // Al desplegar una misión nueva, el enjambre se reinicia por completo
+    // del lado del servidor; se borran las abejas viejas del mapa para que
+    // no queden abejas "fantasma" de un despliegue anterior con otro número
+    // de drones.
+    Object.values(drones).forEach(d => mapa.removeLayer(d.marker));
+    Object.keys(drones).forEach(id => delete drones[id]);
+    redibujarTablaDrones();
+  }
+
+  function actualizarDronEnMapa(dronId, lat, lng, bateria, estado) {
+    if (!drones[dronId]) {
+      const marker = L.marker([lat, lng], { icon: iconoAbeja(estado) }).addTo(mapa);
+      drones[dronId] = { marker, bateria, estado };
+    } else {
+      drones[dronId].marker.setLatLng([lat, lng]);
+      drones[dronId].marker.setIcon(iconoAbeja(estado));
+      drones[dronId].bateria = bateria;
+      drones[dronId].estado = estado;
+    }
+    const textoEstado = TEXTO_ESTADO[estado] || estado;
+    drones[dronId].marker.bindPopup(`<b>${dronId}</b><br>Batería: ${bateria}%<br>${textoEstado}`);
+    redibujarTablaDrones();
+  }
+
+  function redibujarTablaDrones() {
+    const cuerpo = document.getElementById("tabla-drones");
+    cuerpo.innerHTML = "";
+    Object.keys(drones).sort().forEach(id => {
+      const d = drones[id];
+      const claseBateria = d.bateria > 60 ? "bateria-alta" : (d.bateria > 30 ? "bateria-media" : "bateria-baja");
+      const textoEstado = TEXTO_ESTADO[d.estado] || d.estado;
+      const fila = document.createElement("tr");
+      fila.innerHTML = `<td>${id}</td><td class="${claseBateria}">${d.bateria}%</td><td>${textoEstado}</td>`;
+      cuerpo.appendChild(fila);
+    });
+  }
+
+  // ---------- ACCIONES (requieren token) ----------
+  async function desplegarEscudo() {
+    const poligono = obtenerCoordenadasPoligono();
+    if (!poligono) {
+      alert("Primero dibuja el polígono del terreno en el mapa.");
+      return;
+    }
+    const terrenoId = document.getElementById("input-terreno").value.trim() || "TERRENO-SIN-NOMBRE";
+    const numDrones = parseInt(document.getElementById("input-num-drones").value) || 1;
+
+    const resp = await fetch("/api/v1/mission/start", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + token
+      },
+      body: JSON.stringify({
+        terreno_id: terrenoId,
+        polygon_coordinates: poligono,
+        num_drones: numDrones
+      })
+    });
+    const datos = await resp.json();
+    if (!resp.ok) {
+      alert("No se pudo desplegar el escudo: " + (datos.detail || "error desconocido"));
+      return;
+    }
+    // El evento en el log de actividad llega solo por WebSocket (evento
+    // MISION_INICIADA), para no duplicarlo con esta respuesta directa.
+  }
+
+  async function activarKillSwitch() {
+    const razon = prompt("Motivo del paro de emergencia:", "Detención manual desde el panel");
+    if (razon === null) return;
+
+    const resp = await fetch("/api/v1/security/kill-switch", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + token
+      },
+      body: JSON.stringify({ reason: razon })
+    });
+    const datos = await resp.json();
+    if (!resp.ok) {
+      alert("No se pudo activar el kill-switch: " + (datos.detail || "error desconocido"));
+      return;
+    }
+    // El evento en el log de actividad llega solo por WebSocket (evento
+    // KILL_SWITCH_ACTIVADO), para no duplicarlo con esta respuesta directa.
+  }
+
+  async function actualizarContadorIntrusiones() {
+    const resp = await fetch("/api/v1/security/intrusion-log", {
+      headers: { "Authorization": "Bearer " + token }
+    });
+    if (!resp.ok) return;
+    const datos = await resp.json();
+    totalIntrusiones = datos.total_intentos_bloqueados;
+    document.getElementById("contador-intrusiones").textContent = totalIntrusiones;
+  }
+
+  // ---------- TELEMETRÍA EN VIVO (WebSocket) ----------
+  function conectarTelemetria() {
+    const protocolo = window.location.protocol === "https:" ? "wss" : "ws";
+    ws = new WebSocket(`${protocolo}://${window.location.host}/api/v1/ws/telemetry`);
+    const estado = document.getElementById("estado-conexion");
+
+    ws.onopen = () => {
+      estado.textContent = "Conectado en vivo";
+      estado.className = "conectado";
+      actualizarContadorIntrusiones();
+    };
+
+    ws.onclose = () => {
+      estado.textContent = "Desconectado";
+      estado.className = "desconectado";
+    };
+
+    ws.onmessage = (mensaje) => {
+      const evento = JSON.parse(mensaje.data);
+
+      if (evento.event === "TELEMETRIA") {
+        actualizarDronEnMapa(evento.dron_id, evento.gps.lat, evento.gps.lng, evento.bateria_pct, evento.estado);
+      } else if (evento.event === "MISION_INICIADA") {
+        if (evento.colmena) {
+          moverColmena(evento.colmena.lat, evento.colmena.lng);
+        }
+        limpiarAbejasDelMapa();
+        agregarEvento(`🛰️ Misión iniciada en ${evento.terreno_id} (${evento.drones_desplegados} drones)`, "normal");
+      } else if (evento.event === "KILL_SWITCH_ACTIVADO") {
+        agregarEvento(`🛑 KILL-SWITCH: ${evento.reason}`, "kill");
+      } else if (evento.event === "INTENTO_INTRUSION") {
+        totalIntrusiones += 1;
+        document.getElementById("contador-intrusiones").textContent = totalIntrusiones;
+        agregarEvento(`🚨 Intrusión bloqueada: ${evento.motivo}`, "intrusion");
+      } else if (evento.event === "PLAGA_DETECTADA_SENSOR") {
+        // Esto viene del sensor de campo real de Richard (AbejitaSimple en
+        // C#), no de la simulación de vuelo de este panel.
+        const lat = evento.lat != null ? evento.lat.toFixed(5) : "?";
+        const lng = evento.lng != null ? evento.lng.toFixed(5) : "?";
+        agregarEvento(`🐛 Plaga detectada por el sensor de campo en (${lat}, ${lng})`, "plaga");
+      }
+    };
+  }
+
+  function agregarEvento(texto, tipo) {
+    const contenedor = document.getElementById("log-eventos");
+    const div = document.createElement("div");
+    div.className = "evento" + (tipo === "intrusion" ? " intrusion" : tipo === "kill" ? " kill" : tipo === "plaga" ? " plaga" : "");
+    const hora = new Date().toLocaleTimeString();
+    div.textContent = `[${hora}] ${texto}`;
+    contenedor.prepend(div);
+  }
+</script>
+</body>
+</html>

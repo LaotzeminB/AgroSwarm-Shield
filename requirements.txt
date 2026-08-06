@@ -8,6 +8,7 @@ charset-normalizer==3.4.9
 click==8.4.2
 colorama==0.4.6
 cryptography==49.0.0
+dnspython==2.8.0
 ecdsa==0.19.2
 fastapi==0.141.1
 h11==0.16.0
@@ -18,6 +19,7 @@ pyasn1==0.6.4
 pycparser==3.0
 pydantic==2.13.4
 pydantic_core==2.46.4
+pymongo==4.17.0
 python-dotenv==1.2.2
 python-jose==3.5.0
 PyYAML==6.0.3
