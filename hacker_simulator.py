@@ -77,7 +77,12 @@ def test_flow():
         headers=headers,
         json={
             "terreno_id": "TERRENO-AGUASCALIENTES-NORTE",
-            "polygon_coordinates": [[21.8823, -102.2826], [21.8830, -102.2810]],
+            "polygon_coordinates": [
+                [21.8823, -102.2826],
+                [21.8830, -102.2826],
+                [21.8830, -102.2810],
+                [21.8823, -102.2810]
+            ],
             "num_drones": 5
         }
     )

@@ -1,5 +1,6 @@
 import sys
 import asyncio
+import math
 import random
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Header, Depends, status, WebSocket, WebSocketDisconnect
@@ -25,48 +26,76 @@ if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8")
 
 # --- TELEMETRÍA EN TIEMPO REAL (WebSockets) ---
-# Lleva la cuenta de qué apps están conectadas al canal de telemetría, para
-# poder mandarles mensajes a todas al mismo tiempo (broadcast).
+# Lleva la cuenta de qué apps están conectadas al canal de telemetría. Cada
+# conexión sabe a qué usuario pertenece (por el token que mandó al conectarse)
+# para que la privacidad entre clientes se garantice AQUÍ, del lado del
+# servidor -no nada más escondiendo cosas en la pantalla de la app-. Aunque
+# dos clientes compartan la misma colmena física, uno nunca debe recibir por
+# la red los datos del otro (ni su terreno, ni su posición, ni su estatus).
 class ConnectionManager:
     def __init__(self):
         self.active_connections: list[WebSocket] = []
+        self.usuario_de_conexion: dict[WebSocket, str] = {}
 
-    async def connect(self, websocket: WebSocket):
+    async def connect(self, websocket: WebSocket, usuario: str | None = None):
         await websocket.accept()
         self.active_connections.append(websocket)
+        if usuario:
+            self.usuario_de_conexion[websocket] = usuario
 
     def disconnect(self, websocket: WebSocket):
         self.active_connections.remove(websocket)
+        self.usuario_de_conexion.pop(websocket, None)
 
     async def broadcast(self, message: dict):
+        """Solo para eventos públicos que no revelan datos privados de
+        ningún cliente (la colmena de demostración, la bitácora general de
+        intentos de intrusión)."""
         for connection in self.active_connections:
             await connection.send_json(message)
+
+    async def enviar_a_usuarios(self, message: dict, usuarios_permitidos: set):
+        """El mensaje llega ÚNICAMENTE a las conexiones de esos usuarios.
+        Ni a otros clientes, ni a conexiones anónimas (sin token)."""
+        for connection in self.active_connections:
+            if self.usuario_de_conexion.get(connection) in usuarios_permitidos:
+                await connection.send_json(message)
 
 manager = ConnectionManager()
 
 # Bolsa de posibles drones del enjambre. No todos están activos siempre:
-# "mission/start" decide cuántos de estos se usan, según lo que pida la app.
+# cada colmena usa los que necesite su terreno en turno, según lo que pida
+# la app (los IDs se repiten entre colmenas distintas; cada app solo mira
+# los de SU propia colmena, así que no hay confusión).
 MAX_DRONES_SIMULADOS = 30
 DRON_IDS = [f"DRON-{i:02d}" for i in range(1, MAX_DRONES_SIMULADOS + 1)]
 
-# Colmena solar: punto de partida y regreso de todo el enjambre. Empieza en
-# Aguascalientes por defecto, pero se mueve al centro del terreno en cuanto
-# alguien dibuja un polígono y presiona "Desplegar Escudo".
 PASOS_DE_VUELO = 6      # cuántos "saltos" tarda en llegar de la base al punto de patrullaje (y de regreso)
 PASOS_TRATANDO = 2       # cuántos saltos se queda quieto "tratando la plaga" antes de volver
 
-MISION_ACTIVA = {
-    "poligono": None,               # lista de [lat, lng] del terreno dibujado, o None si no se ha desplegado nada
-    "base_lat": 21.8823,
-    "base_lng": -102.2826,
-    "drones_activos": DRON_IDS[:5],  # antes de desplegar nada, se muestran 5 de ejemplo
-    "detenido": False                # True mientras el kill-switch esté activo (drones aterrizados)
-}
+# --- SERVICIO DE ESCUDO COMPARTIDO ("Shared", criterio CASE del proyecto) ---
+# Varios clientes con terrenos vecinos pueden compartir la misma colmena
+# solar en vez de tener cada quien la suya: si el terreno nuevo cae dentro
+# de este radio de una colmena que ya existe, se une a ella y el enjambre
+# reparte su tiempo por turnos entre todos los terrenos de esa colmena. Si
+# no hay ninguna cerca, se crea una colmena nueva solo para ese cliente.
+RADIO_COMPARTIDO_KM = 2.0
+PASOS_POR_TURNO = 8      # cuántos "pasos" de vuelo dura el turno de un terreno antes de rotar al siguiente
 
 def _centroide_poligono(poligono):
     lat_prom = sum(p[0] for p in poligono) / len(poligono)
     lng_prom = sum(p[1] for p in poligono) / len(poligono)
     return lat_prom, lng_prom
+
+def _distancia_km(lat1, lng1, lat2, lng2):
+    """Distancia entre dos puntos GPS (fórmula de Haversine), para saber si
+    dos terrenos están lo bastante cerca como para compartir colmena."""
+    radio_tierra_km = 6371
+    dlat = math.radians(lat2 - lat1)
+    dlng = math.radians(lng2 - lng1)
+    a = (math.sin(dlat / 2) ** 2
+         + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlng / 2) ** 2)
+    return radio_tierra_km * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 def _punto_dentro_del_poligono(lat, lng, poligono):
     """Algoritmo de 'ray casting': cuenta cuántas veces una línea horizontal
@@ -83,35 +112,77 @@ def _punto_dentro_del_poligono(lat, lng, poligono):
                 dentro = not dentro
     return dentro
 
-def _punto_aleatorio_en_poligono(poligono, intentos=30):
-    """Prueba puntos al azar dentro del rectángulo que rodea al polígono
-    hasta encontrar uno que quede realmente adentro de la figura dibujada."""
-    lats = [p[0] for p in poligono]
-    lngs = [p[1] for p in poligono]
+def _punto_aleatorio_en_poligono(poligono, limites=None, intentos=30):
+    """Prueba puntos al azar dentro del rectángulo que rodea al polígono (o
+    dentro de 'limites' si se da, para quedarse en una sola sección) hasta
+    encontrar uno que quede realmente adentro de la figura dibujada."""
+    if limites:
+        lat_min, lat_max, lng_min, lng_max = limites
+    else:
+        lats = [p[0] for p in poligono]
+        lngs = [p[1] for p in poligono]
+        lat_min, lat_max, lng_min, lng_max = min(lats), max(lats), min(lngs), max(lngs)
+
     for _ in range(intentos):
-        lat = random.uniform(min(lats), max(lats))
-        lng = random.uniform(min(lngs), max(lngs))
+        lat = random.uniform(lat_min, lat_max)
+        lng = random.uniform(lng_min, lng_max)
         if _punto_dentro_del_poligono(lat, lng, poligono):
             return lat, lng
-    return _centroide_poligono(poligono)  # polígono muy angosto: usa el centro
+    # Esa sección del rectángulo no tiene suficiente terreno adentro del
+    # polígono (esquina angosta, etc.): usa el centro de la sección.
+    return (lat_min + lat_max) / 2, (lng_min + lng_max) / 2
 
-def _nuevo_objetivo_patrullaje():
-    """Elige un punto al azar dentro del terreno dibujado para que el dron
-    vuele hacia allá. Si todavía no se ha desplegado ningún terreno, patrulla
-    cerca de la colmena por defecto."""
-    poligono = MISION_ACTIVA["poligono"]
-    if poligono and len(poligono) >= 3:
-        return _punto_aleatorio_en_poligono(poligono)
+def _calcular_secciones(poligono, dron_ids):
+    """Divide el rectángulo que rodea al terreno en una cuadrícula (una
+    celda por dron), para que cada dron patrulle solo su propio cachito y
+    nunca se cruce con el de otro."""
+    lats = [p[0] for p in poligono]
+    lngs = [p[1] for p in poligono]
+    lat_min, lat_max = min(lats), max(lats)
+    lng_min, lng_max = min(lngs), max(lngs)
+
+    n = len(dron_ids)
+    columnas = max(1, math.ceil(math.sqrt(n)))
+    filas = max(1, math.ceil(n / columnas))
+    ancho_lat = (lat_max - lat_min) / filas
+    ancho_lng = (lng_max - lng_min) / columnas
+
+    secciones = {}
+    for indice, dron_id in enumerate(dron_ids):
+        fila = indice // columnas
+        columna = indice % columnas
+        seccion_lat_min = lat_min + fila * ancho_lat
+        seccion_lng_min = lng_min + columna * ancho_lng
+        secciones[dron_id] = (
+            seccion_lat_min, seccion_lat_min + ancho_lat,
+            seccion_lng_min, seccion_lng_min + ancho_lng
+        )
+    return secciones
+
+def _terreno_en_turno(colmena):
+    """El terreno que está siendo patrullado ahora mismo en esa colmena."""
+    if not colmena["terrenos"]:
+        return None
+    return colmena["terrenos"][colmena["indice_terreno_actual"]]
+
+def _nuevo_objetivo_patrullaje(colmena, dron_id):
+    """Elige un punto al azar para que el dron vuele hacia allá: dentro de
+    SU sección del terreno que esté en turno ahorita."""
+    terreno = _terreno_en_turno(colmena)
+    if terreno:
+        limites = colmena["secciones"].get(dron_id)
+        return _punto_aleatorio_en_poligono(terreno["poligono"], limites=limites)
     return (
-        MISION_ACTIVA["base_lat"] + random.uniform(-0.003, 0.003),
-        MISION_ACTIVA["base_lng"] + random.uniform(-0.003, 0.003)
+        colmena["lat"] + random.uniform(-0.003, 0.003),
+        colmena["lng"] + random.uniform(-0.003, 0.003)
     )
 
-def _estado_inicial_dron():
-    lat_objetivo, lng_objetivo = _nuevo_objetivo_patrullaje()
+def _estado_inicial_dron(colmena, dron_id):
+    lat_objetivo, lng_objetivo = _nuevo_objetivo_patrullaje(colmena, dron_id)
     return {
-        "lat": MISION_ACTIVA["base_lat"],
-        "lng": MISION_ACTIVA["base_lng"],
+        "dron_id": dron_id,
+        "lat": colmena["lat"],
+        "lng": colmena["lng"],
         "objetivo_lat": lat_objetivo,
         "objetivo_lng": lng_objetivo,
         "fase": "PATRULLANDO",       # PATRULLANDO (saliendo) -> TRATANDO_PLAGA -> REGRESANDO_BASE
@@ -119,11 +190,11 @@ def _estado_inicial_dron():
         "bateria_pct": 100
     }
 
-def _avanzar_dron(estado: dict) -> dict:
+def _avanzar_dron(colmena, estado: dict) -> dict:
     """Mueve un dron un paso dentro de su ciclo: sale de la colmena,
     patrulla/trata la plaga, y regresa a recargar. Al llegar a la base
     vuelve a salir hacia un punto nuevo, en un ciclo infinito."""
-    base_lat, base_lng = MISION_ACTIVA["base_lat"], MISION_ACTIVA["base_lng"]
+    base_lat, base_lng = colmena["lat"], colmena["lng"]
 
     if estado["fase"] == "PATRULLANDO":
         fraccion = 1 - (estado["pasos_restantes"] - 1) / PASOS_DE_VUELO
@@ -152,12 +223,13 @@ def _avanzar_dron(estado: dict) -> dict:
             # Llegó a la colmena: recarga.
             estado["lat"], estado["lng"] = base_lat, base_lng
             estado["bateria_pct"] = 100
-            if MISION_ACTIVA["detenido"]:
+            if colmena["detenido"]:
                 # Kill-switch activo: se queda aterrizado hasta la próxima misión.
                 estado["fase"] = "EN_BASE"
             else:
-                # Vuelo normal: recarga y sale de nuevo hacia un punto nuevo.
-                estado["objetivo_lat"], estado["objetivo_lng"] = _nuevo_objetivo_patrullaje()
+                # Vuelo normal: recarga y sale de nuevo hacia un punto nuevo
+                # (dentro de su misma sección del terreno en turno).
+                estado["objetivo_lat"], estado["objetivo_lng"] = _nuevo_objetivo_patrullaje(colmena, estado["dron_id"])
                 estado["fase"] = "PATRULLANDO"
                 estado["pasos_restantes"] = PASOS_DE_VUELO
 
@@ -175,53 +247,174 @@ def _forzar_regreso_a_base(estado: dict) -> dict:
     estado["pasos_restantes"] = PASOS_DE_VUELO
     return estado
 
-def _estado_desfasado_al_azar() -> dict:
+def _estado_desfasado_al_azar(colmena, dron_id) -> dict:
     """Crea un dron ya 'en vuelo', adelantado un número al azar de pasos
     dentro de su ciclo, para que el enjambre no salga siempre en bloque
-    desde la colmena al arrancar el servidor."""
-    estado = _estado_inicial_dron()
+    desde la colmena."""
+    estado = _estado_inicial_dron(colmena, dron_id)
     largo_del_ciclo = PASOS_DE_VUELO + PASOS_TRATANDO + PASOS_DE_VUELO
     for _ in range(random.randint(0, largo_del_ciclo - 1)):
-        _avanzar_dron(estado)
+        _avanzar_dron(colmena, estado)
     return estado
 
-# Estado en memoria de cada dron del enjambre (posición real, no aleatoria
-# en cada tick, para que la animación se vea como un vuelo continuo). Solo
-# se llenan los que están activos; el resto de la bolsa (DRON_IDS) se crea
-# hasta que "mission/start" los active.
-ENJAMBRE = {dron_id: _estado_desfasado_al_azar() for dron_id in MISION_ACTIVA["drones_activos"]}
+def _asignar_drones_para_terreno(colmena):
+    """(Re)activa el enjambre de una colmena para que patrulle el terreno
+    que esté en turno ahorita, con el número de drones que ese cliente pidió
+    (topado al máximo de la simulación)."""
+    terreno = _terreno_en_turno(colmena)
+    if not terreno:
+        colmena["drones_activos"] = []
+        colmena["secciones"] = {}
+        return
+    num = max(1, min(terreno["num_drones"], MAX_DRONES_SIMULADOS))
+    ids_nuevos = DRON_IDS[:num]
+    colmena["drones_activos"] = ids_nuevos
+    colmena["secciones"] = _calcular_secciones(terreno["poligono"], ids_nuevos)
+    for dron_id in ids_nuevos:
+        colmena["enjambre"][dron_id] = _estado_desfasado_al_azar(colmena, dron_id)
+
+def _nueva_colmena(colmena_id, lat, lng, es_demo=False):
+    return {
+        "colmena_id": colmena_id,
+        "lat": lat,
+        "lng": lng,
+        "es_demo": es_demo,
+        "terrenos": [],              # cada uno: {terreno_id, usuario, poligono, num_drones}
+        "indice_terreno_actual": 0,
+        "pasos_en_turno_actual": 0,
+        "drones_activos": [],
+        "secciones": {},
+        "detenido": False,
+        "enjambre": {}
+    }
+
+def _asignar_colmena(terreno_id, usuario, poligono, num_drones):
+    """Busca una colmena real ya existente lo bastante cerca del terreno
+    nuevo para compartirla; si no hay ninguna, crea una colmena nueva solo
+    para este cliente. Devuelve (colmena, compartida)."""
+    centro_lat, centro_lng = _centroide_poligono(poligono)
+
+    # Si este mismo usuario ya tenía un terreno en alguna colmena, se le
+    # quita de ahí primero (para no dejarlo duplicado si vuelve a desplegar).
+    for colmena in COLMENAS.values():
+        colmena["terrenos"] = [t for t in colmena["terrenos"] if t["usuario"] != usuario]
+
+    # Borra colmenas reales que se quedaron sin ningún cliente.
+    for cid in [c for c, colm in COLMENAS.items() if not colm["terrenos"] and not colm.get("es_demo")]:
+        del COLMENAS[cid]
+
+    mejor_colmena, menor_distancia = None, None
+    for colmena in COLMENAS.values():
+        if colmena.get("es_demo"):
+            continue
+        distancia = _distancia_km(centro_lat, centro_lng, colmena["lat"], colmena["lng"])
+        if distancia <= RADIO_COMPARTIDO_KM and (menor_distancia is None or distancia < menor_distancia):
+            mejor_colmena, menor_distancia = colmena, distancia
+
+    nuevo_terreno = {"terreno_id": terreno_id, "usuario": usuario, "poligono": poligono, "num_drones": num_drones}
+
+    if mejor_colmena:
+        mejor_colmena["terrenos"].append(nuevo_terreno)
+        # La colmena se reacomoda al centro de todos los terrenos que atiende.
+        lats = [_centroide_poligono(t["poligono"])[0] for t in mejor_colmena["terrenos"]]
+        lngs = [_centroide_poligono(t["poligono"])[1] for t in mejor_colmena["terrenos"]]
+        mejor_colmena["lat"] = sum(lats) / len(lats)
+        mejor_colmena["lng"] = sum(lngs) / len(lngs)
+        return mejor_colmena, len(mejor_colmena["terrenos"]) > 1
+
+    nueva_id = f"COLMENA-{len(COLMENAS) + 1:02d}"
+    nueva = _nueva_colmena(nueva_id, centro_lat, centro_lng)
+    nueva["terrenos"].append(nuevo_terreno)
+    COLMENAS[nueva_id] = nueva
+    return nueva, False
+
+async def _rotar_turno(colmena):
+    """Le toca el turno de patrullaje al siguiente terreno que comparte esa
+    colmena. Cada cliente de esa colmena recibe SOLO un aviso sobre sí mismo
+    (si ya le toca o sigue esperando) -nunca el nombre ni el terreno del
+    cliente que sí está en turno, para no revelar el estatus de nadie más."""
+    colmena["indice_terreno_actual"] = (colmena["indice_terreno_actual"] + 1) % len(colmena["terrenos"])
+    colmena["pasos_en_turno_actual"] = 0
+    _asignar_drones_para_terreno(colmena)
+    terreno_en_turno = _terreno_en_turno(colmena)
+    for terreno in colmena["terrenos"]:
+        await manager.enviar_a_usuarios({
+            "event": "TURNO_ROTADO",
+            "colmena_id": colmena["colmena_id"],
+            "es_tu_turno": terreno["usuario"] == terreno_en_turno["usuario"],
+            "terrenos_compartiendo_colmena": len(colmena["terrenos"]),
+            "timestamp_utc": datetime.now(timezone.utc).isoformat()
+        }, {terreno["usuario"]})
+
+# Colmenas activas en memoria (colmena_id -> datos). Empieza con una colmena
+# de demostración (para que siempre haya algo de actividad en el mapa,
+# incluso antes de que un cliente real despliegue su primer terreno). Las
+# colmenas reales las crea/comparte "mission/start" según dónde caiga cada
+# terreno.
+COLMENAS = {}
+_colmena_demo = _nueva_colmena("COLMENA-DEMO", 21.8823, -102.2826, es_demo=True)
+_colmena_demo["terrenos"].append({
+    "terreno_id": "DEMO",
+    "usuario": "demo",
+    "poligono": [
+        [21.8823 - 0.003, -102.2826 - 0.003], [21.8823 + 0.003, -102.2826 - 0.003],
+        [21.8823 + 0.003, -102.2826 + 0.003], [21.8823 - 0.003, -102.2826 + 0.003]
+    ],
+    "num_drones": 5
+})
+COLMENAS["COLMENA-DEMO"] = _colmena_demo
+_asignar_drones_para_terreno(COLMENAS["COLMENA-DEMO"])
 
 async def simulate_drone_telemetry():
     """Mientras no haya ESP32 real conectado (día 9-11), este bucle mueve a
-    cada dron activo un paso de su vuelo (colmena -> patrullaje -> colmena) y
-    transmite su posición, para que la app pueda animarlos en el mapa."""
+    cada dron activo de cada colmena un paso de su vuelo (colmena ->
+    patrullaje -> colmena) y transmite su posición, para que la app pueda
+    animarlos en el mapa. Si una colmena atiende a más de un cliente, va
+    rotando de cuál terreno es el turno."""
     while True:
         await asyncio.sleep(2.5)
         if manager.active_connections:
-            for dron_id in MISION_ACTIVA["drones_activos"]:
-                estado = _avanzar_dron(ENJAMBRE[dron_id])
-                telemetria = {
-                    "event": "TELEMETRIA",
-                    "dron_id": dron_id,
-                    "bateria_pct": estado["bateria_pct"],
-                    "gps": {
-                        "lat": round(estado["lat"], 6),
-                        "lng": round(estado["lng"], 6)
-                    },
-                    "estado": estado["fase"],
-                    "timestamp_utc": datetime.now(timezone.utc).isoformat()
-                }
-                await manager.broadcast(telemetria)
-                # Nota: esta telemetría (posición de vuelo simulada del
-                # enjambre) NO se guarda en la colección "Telemetria" de
-                # Mongo, porque esa colección es la que llena de verdad el
-                # sensor de campo de Richard (AbejitaSimple, en C#). Guardar
-                # ahí también los datos de esta simulación duplicaría/
-                # mezclaría dos fuentes distintas de datos en el mismo lugar.
-                # En vez de eso, este backend LEE esa colección para
-                # reaccionar a sus detecciones reales (ver
-                # escuchar_sensores_richard más abajo) — así los dos
-                # programas quedan coordinados en vez de competir.
+            for colmena in list(COLMENAS.values()):
+                terreno_en_turno = _terreno_en_turno(colmena)
+                for dron_id in colmena["drones_activos"]:
+                    estado = _avanzar_dron(colmena, colmena["enjambre"][dron_id])
+                    telemetria = {
+                        "event": "TELEMETRIA",
+                        "colmena_id": colmena["colmena_id"],
+                        "dron_id": dron_id,
+                        "bateria_pct": estado["bateria_pct"],
+                        "gps": {
+                            "lat": round(estado["lat"], 6),
+                            "lng": round(estado["lng"], 6)
+                        },
+                        "estado": estado["fase"],
+                        "timestamp_utc": datetime.now(timezone.utc).isoformat()
+                    }
+                    if colmena.get("es_demo"):
+                        # La colmena de demostración no tiene datos privados
+                        # de ningún cliente real: se puede ver públicamente.
+                        await manager.broadcast(telemetria)
+                    elif terreno_en_turno:
+                        # Solo le llega al cliente cuyo terreno está en turno
+                        # ahora mismo -ni siquiera a los demás que comparten
+                        # la misma colmena- porque esas coordenadas son de SU
+                        # terreno, no del de nadie más.
+                        await manager.enviar_a_usuarios(telemetria, {terreno_en_turno["usuario"]})
+                    # Nota: esta telemetría (posición de vuelo simulada del
+                    # enjambre) NO se guarda en la colección "Telemetria" de
+                    # Mongo, porque esa colección es la que llena de verdad el
+                    # sensor de campo de Richard (AbejitaSimple, en C#). Guardar
+                    # ahí también los datos de esta simulación duplicaría/
+                    # mezclaría dos fuentes distintas de datos en el mismo lugar.
+                    # En vez de eso, este backend LEE esa colección para
+                    # reaccionar a sus detecciones reales (ver
+                    # escuchar_sensores_richard más abajo) — así los dos
+                    # programas quedan coordinados en vez de competir.
+
+                if len(colmena["terrenos"]) > 1 and not colmena["detenido"]:
+                    colmena["pasos_en_turno_actual"] += 1
+                    if colmena["pasos_en_turno_actual"] >= PASOS_POR_TURNO:
+                        await _rotar_turno(colmena)
 
 async def escuchar_sensores_richard():
     """Lee la colección 'Telemetria' de MongoDB que llena en vivo el
@@ -391,6 +584,7 @@ class MissionStartRequest(BaseModel):
 
 class KillSwitchRequest(BaseModel):
     reason: str
+    colmena_id: str | None = None  # si se omite, el kill-switch para TODAS las colmenas (paro general)
 
     model_config = {
         "json_schema_extra": {
@@ -489,41 +683,76 @@ def register(datos: RegisterRequest):
     response_description="Confirmación de despliegue + la orden ya cifrada y firmada",
 )
 async def start_mission(mission: MissionStartRequest, user: dict = Depends(get_current_user)):
-    """Recibe el polígono dibujado en la app, mueve la colmena al centro de
-    ese terreno, activa el número de drones pedido (según lo que quepa en la
-    bolsa de simulación) y hace que patrullen dentro de la figura dibujada.
-    También genera la orden de despliegue cifrada (Fernet) y firmada (HMAC)
-    para el enjambre, y avisa en vivo por WebSocket a todas las apps."""
-    if mission.polygon_coordinates and len(mission.polygon_coordinates) >= 3:
-        MISION_ACTIVA["poligono"] = mission.polygon_coordinates
-        MISION_ACTIVA["base_lat"], MISION_ACTIVA["base_lng"] = _centroide_poligono(mission.polygon_coordinates)
+    """Recibe el polígono dibujado en la app y busca (o crea) la colmena que
+    le corresponde: si hay una colmena real cerca, este terreno se une a ella
+    y comparte el enjambre con quien ya estuviera ahí (turnándose); si no hay
+    ninguna cerca, se crea una colmena nueva solo para este cliente. También
+    genera la orden de despliegue cifrada (Fernet) y firmada (HMAC), y avisa
+    por WebSocket -solo a este cliente, nunca a los demás- que ya se desplegó."""
+    usuario_id = user.get("sub", "desconocido")
 
-    num_drones_activos = max(1, min(mission.num_drones, MAX_DRONES_SIMULADOS))
-    MISION_ACTIVA["drones_activos"] = DRON_IDS[:num_drones_activos]
-    MISION_ACTIVA["detenido"] = False
+    if not mission.polygon_coordinates or len(mission.polygon_coordinates) < 3:
+        raise HTTPException(status_code=400, detail="Se necesita un polígono con al menos 3 puntos")
 
-    # Reinicia a cada dron activo desde la colmena (nueva o de siempre) para
-    # que salgan a patrullar el terreno recién marcado.
-    for dron_id in MISION_ACTIVA["drones_activos"]:
-        ENJAMBRE[dron_id] = _estado_desfasado_al_azar()
+    num_drones_pedidos = max(1, min(mission.num_drones, MAX_DRONES_SIMULADOS))
+    colmena, compartida = _asignar_colmena(
+        mission.terreno_id, usuario_id, mission.polygon_coordinates, num_drones_pedidos
+    )
+    colmena["detenido"] = False
 
-    raw_command = f"DEPLOY:{mission.terreno_id}:{num_drones_activos}"
+    # De cortesía, el terreno recién desplegado entra de inmediato en turno
+    # (no tiene que esperar a que le toque, como si fuera nuevo en la fila).
+    for indice, terreno in enumerate(colmena["terrenos"]):
+        if terreno["terreno_id"] == mission.terreno_id:
+            colmena["indice_terreno_actual"] = indice
+            break
+    colmena["pasos_en_turno_actual"] = 0
+    _asignar_drones_para_terreno(colmena)
+
+    raw_command = f"DEPLOY:{mission.terreno_id}:{num_drones_pedidos}"
     signature = generate_mesh_signature(raw_command)
     encrypted_order = encrypt_mesh_payload(raw_command)
 
-    await manager.broadcast({
+    drones_desplegados = len(colmena["drones_activos"])
+
+    # Este aviso es PRIVADO: solo le llega al cliente que acaba de desplegar,
+    # nunca a otros clientes que compartan la misma colmena.
+    await manager.enviar_a_usuarios({
         "event": "MISION_INICIADA",
+        "colmena_id": colmena["colmena_id"],
         "terreno_id": mission.terreno_id,
-        "drones_desplegados": num_drones_activos,
-        "colmena": {"lat": MISION_ACTIVA["base_lat"], "lng": MISION_ACTIVA["base_lng"]},
+        "drones_desplegados": drones_desplegados,
+        "colmena": {"lat": colmena["lat"], "lng": colmena["lng"]},
+        "compartida": compartida,
+        "terrenos_en_colmena": len(colmena["terrenos"]),
         "timestamp_utc": datetime.now(timezone.utc).isoformat()
-    })
+    }, {usuario_id})
+
+    # Si este terreno se unió a una colmena que ya tenía otros clientes, se
+    # les "quitó" el turno de golpe por la cortesía de arriba -así que se les
+    # avisa de inmediato (sin esperar a la siguiente rotación automática) de
+    # que ahora es compartida y no es su turno, sin decirles de quién es el
+    # terreno nuevo ni dónde está.
+    if compartida:
+        for terreno in colmena["terrenos"]:
+            if terreno["usuario"] == usuario_id:
+                continue
+            await manager.enviar_a_usuarios({
+                "event": "TURNO_ROTADO",
+                "colmena_id": colmena["colmena_id"],
+                "es_tu_turno": False,
+                "terrenos_compartiendo_colmena": len(colmena["terrenos"]),
+                "timestamp_utc": datetime.now(timezone.utc).isoformat()
+            }, {terreno["usuario"]})
 
     return {
         "status": "MISIÓN_INICIADA",
+        "colmena_id": colmena["colmena_id"],
         "terreno_id": mission.terreno_id,
-        "drones_desplegados": num_drones_activos,
+        "drones_desplegados": drones_desplegados,
         "drones_pedidos": mission.num_drones,
+        "compartida": compartida,
+        "terrenos_en_colmena": len(colmena["terrenos"]),
         "ciberseguridad": {
             "signature_hmac": signature,
             "encrypted_transmission": encrypted_order
@@ -541,28 +770,47 @@ async def trigger_kill_switch(payload: KillSwitchRequest, user: dict = Depends(g
     """Genera la orden firmada `KILL_SWITCH_ALL_MOTORS_OFF` (opcode 0xFF) y
     la transmite en vivo por WebSocket para que cualquier dron/ESP32
     conectado la reciba, verifique su firma y corte los motores de inmediato.
-    En la simulación, esto hace que todo el enjambre regrese volando a la
-    colmena y se quede aterrizado ahí hasta la siguiente misión."""
-    MISION_ACTIVA["detenido"] = True
-    for dron_id in MISION_ACTIVA["drones_activos"]:
-        _forzar_regreso_a_base(ENJAMBRE[dron_id])
+    En la simulación, esto hace que el enjambre de la colmena regrese
+    volando y se quede aterrizado ahí hasta la siguiente misión.
+
+    Por seguridad, un cliente solo puede apagar colmenas donde ÉL tenga un
+    terreno -nunca la de otro cliente, aunque le pase su colmena_id a mano-.
+    Si no manda colmena_id, se apagan todas las colmenas donde el usuario
+    tenga algo desplegado (pero jamás las de otros clientes)."""
+    usuario_id = user.get("sub", "desconocido")
+
+    if payload.colmena_id:
+        colmena = COLMENAS.get(payload.colmena_id)
+        if not colmena or not any(t["usuario"] == usuario_id for t in colmena["terrenos"]):
+            raise HTTPException(status_code=403, detail="Esa colmena no tiene ningún terreno tuyo")
+        colmenas_afectadas = [colmena]
+    else:
+        colmenas_afectadas = [
+            c for c in COLMENAS.values() if any(t["usuario"] == usuario_id for t in c["terrenos"])
+        ]
 
     emergency_command = "KILL_SWITCH_ALL_MOTORS_OFF"
     signature = generate_mesh_signature(emergency_command)
-
-    # Manejo seguro de timestamp compatible con Python 3.12+
     now_utc = datetime.now(timezone.utc).isoformat()
 
-    await manager.broadcast({
-        "event": "KILL_SWITCH_ACTIVADO",
-        "reason": payload.reason,
-        "timestamp_utc": now_utc,
-        "signature_hmac": signature
-    })
+    for colmena in colmenas_afectadas:
+        colmena["detenido"] = True
+        for dron_id in colmena["drones_activos"]:
+            _forzar_regreso_a_base(colmena["enjambre"][dron_id])
+
+        usuarios_afectados = {t["usuario"] for t in colmena["terrenos"]}
+        await manager.enviar_a_usuarios({
+            "event": "KILL_SWITCH_ACTIVADO",
+            "colmena_id": colmena["colmena_id"],
+            "reason": payload.reason,
+            "timestamp_utc": now_utc,
+            "signature_hmac": signature
+        }, usuarios_afectados)
 
     return {
         "status": "EMERGENCY_STOP_ACTIVATED",
         "hardware_opcode": "0xFF",
+        "colmenas_detenidas": [c["colmena_id"] for c in colmenas_afectadas],
         "reason": payload.reason,
         "timestamp_utc": now_utc,
         "signature_hmac": signature
@@ -646,10 +894,17 @@ def get_intrusion_log(user: dict = Depends(get_current_user)):
 # La App se conecta una sola vez a este canal y se queda escuchando; el
 # servidor le empuja telemetría de los drones y avisos de mission/start y
 # kill-switch en el momento en que ocurren, sin que la App tenga que estar
-# preguntando ("polling") cada rato.
+# preguntando ("polling") cada rato. Manda su token de sesión como parámetro
+# (?token=...) para que el servidor sepa qué cliente es y solo le mande SUS
+# propios datos, aunque comparta colmena con otros clientes.
 @app.websocket("/api/v1/ws/telemetry")
-async def websocket_telemetry(websocket: WebSocket):
-    await manager.connect(websocket)
+async def websocket_telemetry(websocket: WebSocket, token: str | None = None):
+    usuario = None
+    if token:
+        payload = decode_access_token(token)
+        if payload:
+            usuario = payload.get("sub")
+    await manager.connect(websocket, usuario)
     try:
         while True:
             # Por ahora no esperamos nada de la App en este canal, pero hay
