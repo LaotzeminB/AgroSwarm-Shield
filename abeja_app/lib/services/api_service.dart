@@ -2,11 +2,11 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
-/// Habla con el backend real de AgroSwarm Shield (FastAPI de Laotzemin).
-/// La dirección del servidor es configurable porque cada quien lo corre
-/// en su propia computadora/red durante las pruebas y la demo.
+/// Habla con el backend real de AgroSwarm Shield (FastAPI de Laotzemin),
+/// desplegado en la nube (Render) con dirección fija: no requiere
+/// configuración manual en ningún celular ni red.
 class ApiService {
-  static String _baseUrl = 'http://10.0.2.2:8000';
+  static String _baseUrl = 'https://agroswarm-shield.onrender.com';
   static String? _token;
 
   static String get baseUrl => _baseUrl;
@@ -47,13 +47,16 @@ class ApiService {
   ) async {
     http.Response resp;
     try {
+      // 45s porque el servidor gratuito de Render "se duerme" tras 15
+      // minutos sin uso y tarda unos 30-50s en despertar en la primera
+      // petición. Las siguientes ya responden normal (menos de 1s).
       resp = await http
           .post(_uri(path), headers: _headers, body: jsonEncode(cuerpo))
-          .timeout(const Duration(seconds: 10));
+          .timeout(const Duration(seconds: 45));
     } catch (_) {
       throw ApiException(
         'No se pudo conectar con el servidor ($_baseUrl). '
-        'Revisa que esté prendido y que el celular esté en la misma red.',
+        'Revisa tu conexión a internet e intenta de nuevo.',
       );
     }
 
@@ -130,7 +133,7 @@ class ApiService {
     try {
       final resp = await http
           .get(_uri('/api/v1/security/intrusion-log'), headers: _headers)
-          .timeout(const Duration(seconds: 10));
+          .timeout(const Duration(seconds: 45));
       if (resp.statusCode != 200) return 0;
       final datos =
           jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;

@@ -1,9 +1,46 @@
+import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart' as gmaps;
 import 'package:latlong2/latlong.dart';
 import 'package:provider/provider.dart';
 import '../providers/dron_provider.dart';
 import '../widgets/panel_controles.dart';
+
+/// Google Maps solo acepta imágenes como ícono de marcador (no permite
+/// widgets normales de Flutter como flutter_map), así que dibujamos un
+/// círculo de color con el emoji encima y lo convertimos a imagen una
+/// sola vez por color/estado.
+Future<gmaps.BitmapDescriptor> _generarIconoEmoji(
+  String emoji,
+  Color colorFondo, {
+  double tamano = 110,
+}) async {
+  final recorder = ui.PictureRecorder();
+  final canvas = Canvas(recorder);
+  final radio = tamano / 2;
+
+  canvas.drawCircle(Offset(radio, radio), radio, Paint()..color = colorFondo);
+  canvas.drawCircle(
+    Offset(radio, radio),
+    radio - 2,
+    Paint()
+      ..color = Colors.white
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 4,
+  );
+
+  final textPainter = TextPainter(textDirection: TextDirection.ltr)
+    ..text = TextSpan(text: emoji, style: TextStyle(fontSize: tamano * 0.55))
+    ..layout();
+  textPainter.paint(
+    canvas,
+    Offset(radio - textPainter.width / 2, radio - textPainter.height / 2),
+  );
+
+  final imagen = await recorder.endRecording().toImage(tamano.toInt(), tamano.toInt());
+  final bytes = await imagen.toByteData(format: ui.ImageByteFormat.png);
+  return gmaps.BitmapDescriptor.bytes(bytes!.buffer.asUint8List());
+}
 
 gmaps.LatLng _aGoogle(LatLng p) => gmaps.LatLng(p.latitude, p.longitude);
 LatLng _deGoogle(gmaps.LatLng p) => LatLng(p.latitude, p.longitude);
@@ -23,12 +60,31 @@ class _MapaScreenState extends State<MapaScreen> {
   final List<LatLng> _puntosDelimitacion = [];
   bool _desplegando = false;
 
+  // --- Íconos de abeja precalculados (uno por color/estado) ---
+  final Map<String, gmaps.BitmapDescriptor> _iconosDron = {};
+  gmaps.BitmapDescriptor? _iconoColmena;
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       Provider.of<DronProvider>(context, listen: false).conectarTelemetria();
     });
+    _prepararIconos();
+  }
+
+  Future<void> _prepararIconos() async {
+    final estados = <String, Color>{
+      'PATRULLANDO': Colors.amber.shade700,
+      'REGRESANDO_BASE': Colors.blue.shade700,
+      'EN_BASE': Colors.deepPurple,
+      'TRATANDO_PLAGA': Colors.red.shade700,
+    };
+    for (final entrada in estados.entries) {
+      _iconosDron[entrada.key] = await _generarIconoEmoji('🐝', entrada.value);
+    }
+    _iconoColmena = await _generarIconoEmoji('🏠', Colors.green.shade800, tamano: 130);
+    if (mounted) setState(() {});
   }
 
   // ============================================================
@@ -130,16 +186,11 @@ class _MapaScreenState extends State<MapaScreen> {
   }
 
   gmaps.BitmapDescriptor _iconoPorEstado(String estado) {
-    switch (estado) {
-      case 'REGRESANDO_BASE':
-        return gmaps.BitmapDescriptor.defaultMarkerWithHue(gmaps.BitmapDescriptor.hueAzure);
-      case 'EN_BASE':
-        return gmaps.BitmapDescriptor.defaultMarkerWithHue(gmaps.BitmapDescriptor.hueViolet);
-      case 'TRATANDO_PLAGA':
-        return gmaps.BitmapDescriptor.defaultMarkerWithHue(gmaps.BitmapDescriptor.hueRed);
-      default:
-        return gmaps.BitmapDescriptor.defaultMarkerWithHue(gmaps.BitmapDescriptor.hueYellow);
-    }
+    // Mientras se generan los íconos de abeja (primer instante tras abrir
+    // el mapa) se usa el pin de color normal como respaldo.
+    return _iconosDron[estado] ??
+        _iconosDron['PATRULLANDO'] ??
+        gmaps.BitmapDescriptor.defaultMarkerWithHue(gmaps.BitmapDescriptor.hueYellow);
   }
 
   @override
@@ -201,7 +252,8 @@ class _MapaScreenState extends State<MapaScreen> {
             gmaps.Marker(
               markerId: const gmaps.MarkerId('colmena'),
               position: _aGoogle(colmena),
-              icon: gmaps.BitmapDescriptor.defaultMarkerWithHue(gmaps.BitmapDescriptor.hueGreen),
+              icon: _iconoColmena ??
+                  gmaps.BitmapDescriptor.defaultMarkerWithHue(gmaps.BitmapDescriptor.hueGreen),
               infoWindow: const gmaps.InfoWindow(title: 'Colmena Solar'),
             ),
             ...dronProvider.drones.entries.map((entrada) {
